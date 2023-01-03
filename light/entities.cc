@@ -105,7 +105,11 @@ light_t::light_t() :
     project_texture{this, "project_texture", ""},
     suntexture{this, "suntexture", ""},
     nostaticlight{this, "nostaticlight", false},
-    surflight_group{this, "surflight_group", 0}
+    surflight_group{this, "surflight_group", 0},
+    surface_minlight_scale{this, "surface_minlight_scale", 64},
+    light_channel_mask{this, "light_channel_mask", CHANNEL_MASK_DEFAULT},
+    shadow_channel_mask{this, "shadow_channel_mask", CHANNEL_MASK_DEFAULT},
+    nonudge{this, "nonudge", false}
 {}
 
 std::string light_t::classname() const
@@ -259,7 +263,7 @@ static void SetupSpotlights(const settings::worldspawn_keys &cfg)
     }
 }
 
-static void CheckEntityFields(const settings::worldspawn_keys &cfg, light_t *entity)
+static void CheckEntityFields(const mbsp_t *bsp, const settings::worldspawn_keys &cfg, light_t *entity)
 {
     if (entity->light.value() == 0.0f)
         entity->light.setValue(DEFAULTLIGHTLEVEL, settings::source::MAP);
@@ -293,6 +297,19 @@ static void CheckEntityFields(const settings::worldspawn_keys &cfg, light_t *ent
         entity->getFormula() == LF_INFINITE || (entity->getFormula() == LF_LOCALMIN && cfg.addminlight.value()) ||
         entity->getFormula() == LF_INVERSE2A) {
         entity->light.setValue(entity->light.value() / entity->samples.value(), settings::source::MAP);
+    }
+
+    // shadow_channel_mask defaults to light_channel_mask
+    if (!entity->shadow_channel_mask.isChanged()) {
+        entity->shadow_channel_mask.setValue(entity->light_channel_mask.value(),
+            settings::source::DEFAULT);
+    }
+
+    if (!entity->surface_minlight_scale.isChanged()) {
+        if (bsp->loadversion->game->id != GAME_QUAKE_II) {
+            // TODO: also use 1.0 for Q2?
+            entity->surface_minlight_scale.setValue(1.0, settings::source::DEFAULT);
+        }
     }
 }
 
@@ -978,7 +995,7 @@ void LoadEntities(const settings::worldspawn_keys &cfg, const mbsp_t *bsp)
                         entity->projfov.value(), entity->projectionmatrix);
             }
 
-            CheckEntityFields(cfg, entity.get());
+            CheckEntityFields(bsp, cfg, entity.get());
         }
     }
 
@@ -1013,7 +1030,7 @@ static qvec3d FixLightOnFace(const mbsp_t *bsp, const qvec3d &point)
 void FixLightsOnFaces(const mbsp_t *bsp)
 {
     for (auto &entity : all_lights) {
-        if (entity->light.value() != 0) {
+        if (entity->light.value() != 0 && !entity->nonudge.value()) {
             entity->origin.setValue(FixLightOnFace(bsp, entity->origin.value()), settings::source::MAP);
         }
     }
@@ -1068,7 +1085,7 @@ aabb3d EstimateVisibleBoundsAtPoint(const qvec3d &point)
         }
     }
 
-    rs.tracePushedRaysIntersection(nullptr);
+    rs.tracePushedRaysIntersection(nullptr, CHANNEL_MASK_DEFAULT);
 
     for (int i = 0; i < N2; i++) {
         const vec_t &dist = rs.getPushedRayHitDist(i);

@@ -2,7 +2,6 @@
 #include <common/bsputils.hh>
 #include <common/qvec.hh>
 
-#include <subprocess.h>
 #include <nanobench.h>
 
 #include <cstring>
@@ -22,6 +21,10 @@ TEST_CASE("detail" * doctest::test_suite("testmaps_q2")) {
     // stats
     CHECK(1 == bsp.dmodels.size());
     // Q2 reserves leaf 0 as an invalid leaf
+    CHECK(mleaf_t{.contents = Q2_CONTENTS_SOLID, .visofs = -1} == bsp.dleafs[0]);
+    // no areaportals except the placeholder
+    CHECK(1 == bsp.dareaportals.size());
+    CHECK(2 == bsp.dareas.size());
 
     // leafs:
     //  6 solid leafs outside the room (* can be more depending on when the "divider" is cut)
@@ -72,6 +75,7 @@ TEST_CASE("detail" * doctest::test_suite("testmaps_q2")) {
     auto *detail_leaf = BSP_FindLeafAtPoint(&bsp, &bsp.dmodels[0], inside_button);
     CHECK(Q2_CONTENTS_SOLID == detail_leaf->contents);
     CHECK(-1 == detail_leaf->cluster);
+    CHECK(0 == detail_leaf->area); // solid leafs get the invalid area 0
 
     // check for button (detail) brush
     CHECK(1 == Leaf_Brushes(&bsp, detail_leaf).size());
@@ -82,17 +86,20 @@ TEST_CASE("detail" * doctest::test_suite("testmaps_q2")) {
     auto *empty_leaf_above_button = BSP_FindLeafAtPoint(&bsp, &bsp.dmodels[0], above_button);
     CHECK(0 == empty_leaf_above_button->contents);
     CHECK(0 == Leaf_Brushes(&bsp, empty_leaf_above_button).size());
+    CHECK(1 == empty_leaf_above_button->area);
 
     auto *empty_leaf_side_room = BSP_FindLeafAtPoint(&bsp, &bsp.dmodels[0], side_room);
     CHECK(0 == empty_leaf_side_room->contents);
     CHECK(0 == Leaf_Brushes(&bsp, empty_leaf_side_room).size());
     CHECK(empty_leaf_side_room->cluster != empty_leaf_above_button->cluster);
+    CHECK(1 == empty_leaf_side_room->area);
 
     auto *empty_leaf_beside_button = BSP_FindLeafAtPoint(&bsp, &bsp.dmodels[0], beside_button);
     CHECK(0 == empty_leaf_beside_button->contents);
     CHECK(-1 != empty_leaf_beside_button->cluster);
     CHECK(empty_leaf_above_button->cluster == empty_leaf_beside_button->cluster);
     CHECK(empty_leaf_above_button != empty_leaf_beside_button);
+    CHECK(1 == empty_leaf_beside_button->area);
 
     CHECK(prt->portals.size() == 5);
     CHECK(prt->portalleafs_real == 0); // not used by Q2
@@ -549,4 +556,47 @@ TEST_CASE("q2_mirrorinside" * doctest::test_suite("testmaps_q2"))
         CHECK_VECTORS_UNOREDERED_EQUAL(TexNames(bsp, BSP_FindFacesAtPoint(&bsp, &bsp.dmodels[0], mist_mirrorinside0_pos)),
             std::vector<std::string>({"e1u1/brwater"}));
     }
+
+    {
+        INFO("_mirrorinside 1 works on func_detail_fence");
+        CHECK_VECTORS_UNOREDERED_EQUAL(TexNames(bsp, BSP_FindFacesAtPoint(&bsp, &bsp.dmodels[0], {32, -348, 156})),
+            std::vector<std::string>({"e1u1/alphamask", "e1u1/alphamask"}));
+    }
+}
+
+/**
+ * Ensure that leaked maps still get areas assigned properly
+ * (empty leafs should get area 1, solid leafs area 0)
+ */
+TEST_CASE("q2_leaked" * doctest::test_suite("testmaps_q2"))
+{
+    const auto [bsp, bspx, prt] = LoadTestmapQ2("q2_leaked.map");
+
+    CHECK(!prt);
+    CHECK(GAME_QUAKE_II == bsp.loadversion->game->id);
+
+    CHECK(bsp.dareaportals.size() == 1);
+    CHECK(bsp.dareas.size() == 2);
+    CHECK(bsp.dleafs.size() == 8);
+    for (auto &leaf : bsp.dleafs) {
+        if (leaf.contents == Q2_CONTENTS_SOLID) {
+            CHECK(0 == leaf.area);
+        } else {
+            CHECK(1 == leaf.area);
+        }
+    }
+}
+
+TEST_CASE("q2_missing_faces" * doctest::test_suite("testmaps_q2") * doctest::may_fail())
+{
+    const auto [bsp, bspx, prt] = LoadTestmapQ2("q2_missing_faces.map");
+
+    const qvec3d point_on_missing_face {-137, 125, -76.1593};
+    const qvec3d point_on_missing_face2 {-30, 12, -75.6411};
+    const qvec3d point_on_present_face {-137, 133, -76.6997};
+
+    CheckFilled(bsp);
+    CHECK(BSP_FindFaceAtPoint(&bsp, &bsp.dmodels[0], point_on_missing_face));
+    CHECK(BSP_FindFaceAtPoint(&bsp, &bsp.dmodels[0], point_on_missing_face2));
+    CHECK(BSP_FindFaceAtPoint(&bsp, &bsp.dmodels[0], point_on_present_face));
 }

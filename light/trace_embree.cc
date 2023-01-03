@@ -20,6 +20,7 @@
 #include <light/light.hh>
 #include <light/bounce.hh>
 #include <light/trace_embree.hh>
+#include <light/entities.hh>
 #include <common/bsputils.hh>
 #include <common/polylib.hh>
 #include <vector>
@@ -66,9 +67,8 @@ static float Face_Alpha(const mbsp_t *bsp, const modelinfo_t *modelinfo, const m
     const int surf_flags = Face_ContentsOrSurfaceFlags(bsp, face);
     const bool is_q2 = bsp->loadversion->game->id == GAME_QUAKE_II;
 
-    // for "_light_alpha", 0 is considered unset
     if (extended_flags.light_alpha) {
-        return extended_flags.light_alpha;
+        return *extended_flags.light_alpha;
     }
 
     // next check "alpha" key (q1)
@@ -165,6 +165,7 @@ sceneinfo CreateGeometry(
             info.shadowself = modelinfo->shadowself.boolValue();
             info.switchableshadow = modelinfo->switchableshadow.boolValue();
             info.switchshadstyle = modelinfo->switchshadstyle.value();
+            info.channelmask = modelinfo->object_channel_mask.value();
 
             info.alpha = Face_Alpha(bsp, modelinfo, face);
 
@@ -272,17 +273,10 @@ inline qvec3f Embree_RayEndpoint(RTCRayN *ray, const qvec3f &dir, size_t N, size
     return org + (dir * tfar);
 }
 
-enum class filtertype_t
-{
-    INTERSECTION,
-    OCCLUSION
-};
-
 static void AddGlassToRay(RTCIntersectContext *context, unsigned rayIndex, float opacity, const qvec3d &glasscolor);
 static void AddDynamicOccluderToRay(RTCIntersectContext *context, unsigned rayIndex, int style);
 
 // called to evaluate transparency
-template<filtertype_t filtertype>
 static void Embree_FilterFuncN(const struct RTCFilterFunctionNArguments *args)
 {
     int *const valid = args->valid;
@@ -311,6 +305,12 @@ static void Embree_FilterFuncN(const struct RTCFilterFunctionNArguments *args)
 
         const modelinfo_t *source_modelinfo = rsi->self;
         const triinfo &hit_triinfo = Embree_LookupTriangleInfo(geomID, primID);
+
+        if (!(hit_triinfo.channelmask & rsi->shadowmask)) {
+            // reject hit
+            valid[i] = INVALID;
+            continue;
+        }
 
         if (!hit_triinfo.modelinfo) {
             // we hit a "skip" face with no associated model
@@ -390,6 +390,48 @@ static void Embree_FilterFuncN(const struct RTCFilterFunctionNArguments *args)
                     continue;
                 }
             }
+        }
+
+        // accept hit
+        // (just need to leave the `valid` value set to VALID)
+    }
+}
+
+/**
+ * For use with all rays coming from a model with non-default channel mask
+ */
+static void PerRay_FilterFuncN(const struct RTCFilterFunctionNArguments *args)
+{
+    int *const valid = args->valid;
+    RTCIntersectContext *const context = args->context;
+    struct RTCRayN *const ray = args->ray;
+    struct RTCHitN *const potentialHit = args->hit;
+    const unsigned int N = args->N;
+
+    const int VALID = -1;
+    const int INVALID = 0;
+
+    auto *rsi = static_cast<const ray_source_info *>(context);
+
+    for (size_t i = 0; i < N; i++) {
+        if (valid[i] != VALID) {
+            // we only need to handle valid rays
+            continue;
+        }
+
+        const unsigned &rayID = RTCRayN_id(ray, N, i);
+        const unsigned &geomID = RTCHitN_geomID(potentialHit, N, i);
+        const unsigned &primID = RTCHitN_primID(potentialHit, N, i);
+
+        // unpack ray index
+        const unsigned rayIndex = rayID;
+
+        const triinfo &hit_triinfo = Embree_LookupTriangleInfo(geomID, primID);
+
+        if (!(hit_triinfo.channelmask & rsi->shadowmask)) {
+            // reject hit
+            valid[i] = INVALID;
+            continue;
         }
 
         // accept hit
@@ -492,8 +534,9 @@ void Embree_TraceInit(const mbsp_t *bsp)
         const bool shadowself = model->shadowself.boolValue();
         const bool shadowworldonly = model->shadowworldonly.boolValue();
         const bool switchableshadow = model->switchableshadow.boolValue();
+        const bool has_custom_channel_mask = (model->object_channel_mask.value() != CHANNEL_MASK_DEFAULT);
 
-        if (!(isWorld || shadow || shadowself || shadowworldonly || switchableshadow))
+        if (!(isWorld || shadow || shadowself || shadowworldonly || switchableshadow || has_custom_channel_mask))
             continue;
 
         for (int i = 0; i < model->model->numfaces; i++) {
@@ -506,6 +549,12 @@ void Embree_TraceInit(const mbsp_t *bsp)
 
             // handle switchableshadow
             if (switchableshadow) {
+                filterfaces.push_back(face);
+                continue;
+            }
+
+            // non-default channel mask
+            if (model->object_channel_mask.value() != CHANNEL_MASK_DEFAULT) {
                 filterfaces.push_back(face);
                 continue;
             }
@@ -591,7 +640,9 @@ void Embree_TraceInit(const mbsp_t *bsp)
     logging::funcprint("Embree version: {}.{}.{}\n", ver_maj, ver_min, ver_pat);
 
     scene = rtcNewScene(device);
-    rtcSetSceneFlags(scene, RTC_SCENE_FLAG_NONE);
+    // we're using RTCIntersectContext::filter so it's required that we set
+    // RTC_SCENE_FLAG_CONTEXT_FILTER_FUNCTION
+    rtcSetSceneFlags(scene, RTC_SCENE_FLAG_CONTEXT_FILTER_FUNCTION);
     rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_HIGH);
     skygeom = CreateGeometry(bsp, device, scene, skyfaces);
     solidgeom = CreateGeometry(bsp, device, scene, solidfaces);
@@ -599,9 +650,9 @@ void Embree_TraceInit(const mbsp_t *bsp)
     CreateGeometryFromWindings(device, scene, skipwindings);
 
     rtcSetGeometryIntersectFilterFunction(
-        rtcGetGeometry(scene, filtergeom.geomID), Embree_FilterFuncN<filtertype_t::INTERSECTION>);
+        rtcGetGeometry(scene, filtergeom.geomID), Embree_FilterFuncN);
     rtcSetGeometryOccludedFilterFunction(
-        rtcGetGeometry(scene, filtergeom.geomID), Embree_FilterFuncN<filtertype_t::OCCLUSION>);
+        rtcGetGeometry(scene, filtergeom.geomID), Embree_FilterFuncN);
 
     rtcCommitScene(scene);
 
@@ -610,56 +661,6 @@ void Embree_TraceInit(const mbsp_t *bsp)
     logging::print("\t{} solid faces\n", solidfaces.size());
     logging::print("\t{} filtered faces\n", filterfaces.size());
     logging::print("\t{} shadow-casting skip faces\n", skipwindings.size());
-}
-
-static RTCRayHit SetupRay_StartStop(const qvec3d &start, const qvec3d &stop)
-{
-    qvec3d dir = stop - start;
-    vec_t dist = qv::normalizeInPlace(dir);
-
-    return SetupRay(0, start, dir, dist);
-}
-
-// public
-hitresult_t TestLight(const qvec3d &start, const qvec3d &stop, const modelinfo_t *self)
-{
-    RTCRay ray = SetupRay_StartStop(start, stop).ray;
-
-    ray_source_info ctx2(nullptr, self);
-    rtcOccluded1(scene, &ctx2, &ray);
-
-    if (ray.tfar < 0.0f)
-        return {false, 0}; // fully occluded
-
-    // no obstruction (or a switchable shadow obstruction only)
-    return {true, ctx2.singleRayShadowStyle};
-}
-
-// public
-hitresult_t TestSky(const qvec3d &start, const qvec3d &dirn, const modelinfo_t *self, const mface_t **face_out)
-{
-    // trace from the sample point towards the sun, and
-    // return true if we hit a sky poly.
-
-    qvec3d dir_normalized = qv::normalize(dirn);
-
-    RTCRayHit ray = SetupRay(0, start, dir_normalized, MAX_SKY_DIST);
-
-    ray_source_info ctx2(nullptr, self);
-    rtcIntersect1(scene, &ctx2, &ray);
-
-    bool hit_sky = (ray.hit.geomID == skygeom.geomID);
-
-    if (face_out) {
-        if (hit_sky) {
-            const sceneinfo &si = Embree_SceneinfoForGeomID(ray.hit.geomID);
-            *face_out = si.triInfo.at(ray.hit.primID).face;
-        } else {
-            *face_out = nullptr;
-        }
-    }
-
-    return {hit_sky, ctx2.singleRayShadowStyle};
 }
 
 static void AddGlassToRay(RTCIntersectContext *context, unsigned rayIndex, float opacity, const qvec3d &glasscolor)
@@ -690,8 +691,20 @@ static void AddDynamicOccluderToRay(RTCIntersectContext *context, unsigned rayIn
 
     if (rs != nullptr) {
         rs->_ray_dynamic_styles[rayIndex] = style;
-    } else {
-        // TestLight case
-        ctx->singleRayShadowStyle = style;
+    }
+}
+
+ray_source_info::ray_source_info(raystream_embree_common_t *raystream_, const modelinfo_t *self_, int shadowmask_) :
+      raystream(raystream_),
+      self(self_),
+      shadowmask(shadowmask_)
+{
+    rtcInitIntersectContext(this);
+
+    flags = RTC_INTERSECT_CONTEXT_FLAG_COHERENT;
+
+    if (shadowmask != CHANNEL_MASK_DEFAULT) {
+        // non-default shadow mask means we have to use the slow path
+        filter = PerRay_FilterFuncN;
     }
 }

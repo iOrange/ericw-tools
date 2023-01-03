@@ -77,6 +77,10 @@ static bool Face_ShouldBounce(const mbsp_t *bsp, const mface_t *face)
         return false;
     }
 
+    if (mi->object_channel_mask.value() != CHANNEL_MASK_DEFAULT) {
+        return false;
+    }
+
     return true;
 }
 
@@ -91,7 +95,7 @@ static void MakeBounceLight(const mbsp_t *bsp, const settings::worldspawn_keys &
     // Calculate intensity...
     vec_t intensity = qv::max(texture_color);
 
-    if (intensity == 0.0) {
+    if (intensity <= 0.0) {
         return;
     }
 

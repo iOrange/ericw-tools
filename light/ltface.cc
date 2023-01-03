@@ -1004,39 +1004,6 @@ constexpr vec_t SQR(vec_t x)
     return x * x;
 }
 
-// this is the inverse of GetLightValue
-float GetLightDist(const settings::worldspawn_keys &cfg, const light_t *entity, vec_t desiredLight)
-{
-    float fadedist;
-    if (entity->getFormula() == LF_LINEAR) {
-        /* Linear formula always has a falloff point */
-        fadedist = fabs(entity->light.value()) - desiredLight;
-        fadedist = fadedist / entity->atten.value() / cfg.scaledist.value();
-        fadedist = max(0.0f, fadedist);
-    } else {
-        /* Calculate the distance at which brightness falls to desiredLight */
-        switch (entity->getFormula()) {
-            case LF_INFINITE:
-            case LF_LOCALMIN: fadedist = FLT_MAX; break;
-            case LF_INVERSE:
-                fadedist = (LF_SCALE * fabs(entity->light.value())) /
-                           (cfg.scaledist.value() * entity->atten.value() * desiredLight);
-                break;
-            case LF_INVERSE2:
-            case LF_INVERSE2A:
-                fadedist = sqrt(fabs(entity->light.value() * SQR(LF_SCALE) /
-                                     (SQR(cfg.scaledist.value()) * SQR(entity->atten.value()) * desiredLight)));
-                if (entity->getFormula() == LF_INVERSE2A) {
-                    fadedist -= (LF_SCALE / (cfg.scaledist.value() * entity->atten.value()));
-                }
-                fadedist = max(0.0f, fadedist);
-                break;
-            default: FError("Internal error: formula not handled");
-        }
-    }
-    return fadedist;
-}
-
 // CHECK: naming? why clamp*min*?
 constexpr void Light_ClampMin(lightsample_t &sample, const vec_t light, const qvec3d &color)
 {
@@ -1155,7 +1122,12 @@ inline bool CullLight(const light_t *entity, const lightsurf_t *lightsurf)
     const settings::worldspawn_keys &cfg = *lightsurf->cfg;
 
     if (light_options.visapprox.value() == visapprox_t::RAYS &&
-        entity->bounds.disjoint(lightsurf->extents.bounds, 0.001)) {
+        entity->bounds.disjoint(lightsurf->extents.bounds, 0.001) &&
+        entity->light_channel_mask.value() == CHANNEL_MASK_DEFAULT &&
+        entity->shadow_channel_mask.value() == CHANNEL_MASK_DEFAULT) {
+        // EstimateVisibleBoundsAtPoint uses CHANNEL_MASK_DEFAULT
+        // for its rays, so only cull lights that are also going to be using
+        // CHANNEL_MASK_DEFAULT for rendering
         return true;
     }
 
@@ -1207,7 +1179,10 @@ static void LightFace_Entity(
     const qplane3d *plane = &lightsurf->plane;
 
     /* vis cull */
-    if (light_options.visapprox.value() == visapprox_t::VIS && VisCullEntity(bsp, lightsurf->pvs, entity->leaf)) {
+    if (light_options.visapprox.value() == visapprox_t::VIS
+        && entity->light_channel_mask.value() == CHANNEL_MASK_DEFAULT
+        && entity->shadow_channel_mask.value() == CHANNEL_MASK_DEFAULT
+        && VisCullEntity(bsp, lightsurf->pvs, entity->leaf)) {
         return;
     }
 
@@ -1226,6 +1201,11 @@ static void LightFace_Entity(
 
     /* sphere cull surface and light */
     if (CullLight(entity, lightsurf)) {
+        return;
+    }
+
+    // check lighting channels
+    if (!(entity->light_channel_mask.value() & lightsurf->modelinfo->object_channel_mask.value())) {
         return;
     }
 
@@ -1263,7 +1243,7 @@ static void LightFace_Entity(
     }
 
     // don't need closest hit, just checking for occlusion between light and surface point
-    rs.tracePushedRaysOcclusion(modelinfo);
+    rs.tracePushedRaysOcclusion(modelinfo, entity->shadow_channel_mask.value());
     total_light_rays += rs.numPushedRays();
 
     int cached_style = entity->style.value();
@@ -1332,6 +1312,11 @@ static void LightFace_Sky(const sun_t *sun, lightsurf_t *lightsurf, lightmapdict
         return;
     }
 
+    // check lighting channels (currently sunlight is always on CHANNEL_MASK_DEFAULT)
+    if (!(lightsurf->modelinfo->object_channel_mask.value() & CHANNEL_MASK_DEFAULT)) {
+        return;
+    }
+
     /* Check each point... */
     raystream_intersection_t &rs = lightsurf->intersection_stream;
     rs.clearPushedRays();
@@ -1372,7 +1357,7 @@ static void LightFace_Sky(const sun_t *sun, lightsurf_t *lightsurf, lightmapdict
 
     // We need to check if the first hit face is a sky face, so we need
     // to test intersection (not occlusion)
-    rs.tracePushedRaysIntersection(modelinfo);
+    rs.tracePushedRaysIntersection(modelinfo, CHANNEL_MASK_DEFAULT);
 
     /* if sunlight is set, use a style 0 light map */
     int cached_style = sun->style;
@@ -1614,7 +1599,7 @@ static void LightFace_LocalMin(const mbsp_t *bsp, const mface_t *face,
         }
 
         // local minlight just needs occlusion, not closest hit
-        rs.tracePushedRaysOcclusion(modelinfo);
+        rs.tracePushedRaysOcclusion(modelinfo, CHANNEL_MASK_DEFAULT);
         total_light_rays += rs.numPushedRays();
 
         const int N = rs.numPushedRays();
@@ -1783,6 +1768,11 @@ LightFace_SurfaceLight(const mbsp_t *bsp, lightsurf_t *lightsurf, lightmapdict_t
     const settings::worldspawn_keys &cfg = *lightsurf->cfg;
     const float surflight_gate = 0.01f;
 
+    // check lighting channels (currently surface lights are always on CHANNEL_MASK_DEFAULT)
+    if (!(lightsurf->modelinfo->object_channel_mask.value() & CHANNEL_MASK_DEFAULT)) {
+        return;
+    }
+
     for (const surfacelight_t &vpl : surface_lights) {
         if (SurfaceLight_SphereCull(&vpl, lightsurf, surflight_gate, hotspot_clamp))
             continue;
@@ -1823,7 +1813,7 @@ LightFace_SurfaceLight(const mbsp_t *bsp, lightsurf_t *lightsurf, lightmapdict_t
                 continue;
 
             total_surflight_rays += rs.numPushedRays();
-            rs.tracePushedRaysOcclusion(lightsurf->modelinfo);
+            rs.tracePushedRaysOcclusion(lightsurf->modelinfo, CHANNEL_MASK_DEFAULT);
 
             const int lightmapstyle = vpl.style;
             lightmap_t *lightmap = Lightmap_ForStyle(lightmaps, lightmapstyle, lightsurf);
@@ -2033,52 +2023,6 @@ inline qvec3d GetDirtVector(const settings::worldspawn_keys &cfg, int i)
     return dirtVectors[i];
 }
 
-float DirtAtPoint(const settings::worldspawn_keys &cfg, raystream_intersection_t *rs, const qvec3d &point,
-    const qvec3d &normal, const modelinfo_t *selfshadow)
-{
-    if (!dirt_in_use) {
-        return 0.0f;
-    }
-
-    qvec3d myUp, myRt;
-    float occlusion = 0;
-
-    // this stuff is just per-point
-
-    GetUpRtVecs(normal, myUp, myRt);
-
-    rs->clearPushedRays();
-
-    for (int j = 0; j < numDirtVectors; j++) {
-
-        // fill in input buffers
-        qvec3d dirtvec = GetDirtVector(cfg, j);
-        qvec3d dir = TransformToTangentSpace(normal, myUp, myRt, dirtvec);
-
-        rs->pushRay(j, point, dir, cfg.dirtDepth.value());
-    }
-
-    Q_assert(rs->numPushedRays() == numDirtVectors);
-
-    // trace the batch
-    rs->tracePushedRaysIntersection(selfshadow);
-
-    // accumulate hitdists
-    for (int j = 0; j < numDirtVectors; j++) {
-        if (rs->getPushedRayHitType(j) == hittype_t::SOLID) {
-            const vec_t dist = rs->getPushedRayHitDist(j);
-            occlusion += min(cfg.dirtDepth.value(), dist);
-        } else {
-            occlusion += cfg.dirtDepth.value();
-        }
-    }
-
-    // process the results.
-    const vec_t avgHitdist = occlusion / numDirtVectors;
-    occlusion = 1 - (avgHitdist / cfg.dirtDepth.value());
-    return occlusion;
-}
-
 /*
  * ============
  * LightFace_CalculateDirt
@@ -2124,7 +2068,10 @@ static void LightFace_CalculateDirt(lightsurf_t *lightsurf)
         }
 
         // trace the batch. need closest hit for dirt, so intersection.
-        rs.tracePushedRaysIntersection(lightsurf->modelinfo);
+        //
+        // use the model's own channel mask as the shadow mask, e.g. so a model in channel 2's AO rays will only hit
+        // other things in channel 2
+        rs.tracePushedRaysIntersection(lightsurf->modelinfo, lightsurf->modelinfo->object_channel_mask.value());
 
         // accumulate hitdists
         for (int k = 0; k < rs.numPushedRays(); k++) {
@@ -2310,41 +2257,6 @@ static std::vector<qvec4f> LightmapNormalsToGLMVector(const lightsurf_t *lightsu
         res.emplace_back(color[0], color[1], color[2], alpha);
     }
     return res;
-}
-
-#if 0
-static std::vector<qvec4f> LightmapToGLMVector(const mbsp_t *bsp, const lightsurf_t *lightsurf)
-{
-    const lightmap_t *lm = Lightmap_ForStyle_ReadOnly(lightsurf, 0);
-    if (lm != nullptr) {
-        return LightmapColorsToGLMVector(lightsurf, lm);
-    }
-    return std::vector<qvec4f>();
-}
-#endif
-
-static qvec3f LinearToGamma22(const qvec3f &c)
-{
-    return qv::pow(c, qvec3f(1 / 2.2f));
-}
-
-static qvec3f Gamma22ToLinear(const qvec3f &c)
-{
-    return qv::pow(c, qvec3f(2.2f));
-}
-
-void GLMVector_GammaToLinear(std::vector<qvec3f> &vec)
-{
-    for (auto &v : vec) {
-        v = Gamma22ToLinear(v);
-    }
-}
-
-void GLMVector_LinearToGamma(std::vector<qvec3f> &vec)
-{
-    for (auto &v : vec) {
-        v = LinearToGamma22(v);
-    }
 }
 
 // Special handling of alpha channel:
@@ -3103,7 +3015,9 @@ void DirectLightFace(const mbsp_t *bsp, lightsurf_t &lightsurf, const settings::
         }
 
         if (auto value = IsSurfaceLitFace(bsp, face)) {
-            minlight = std::get<0>(value.value()) * 64.0f;
+            auto *entity = std::get<3>(value.value());
+            const float surface_minlight_scale = entity ? entity->surface_minlight_scale.value() : 64.0f;
+            minlight = std::get<0>(value.value()) * surface_minlight_scale;
             minlight_color = std::get<2>(value.value());
             LightFace_Min(bsp, face, minlight_color, minlight, &lightsurf, lightmaps, std::get<1>(value.value()));
         }

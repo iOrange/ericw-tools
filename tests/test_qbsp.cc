@@ -13,7 +13,6 @@
 #include <common/log.hh>
 #include <testmaps.hh>
 
-#include <subprocess.h>
 #include <nanobench.h>
 
 #include <fstream>
@@ -72,120 +71,6 @@ mapentity_t &LoadMapPath(const std::filesystem::path &name)
 
 #include <common/bspinfo.hh>
 
-#if 0
-std::tuple<mbsp_t, bspxentries_t, std::optional<prtfile_t>> LoadTestmapRef(const std::filesystem::path &name)
-{
-    const char *destdir = test_quake2_maps_dir;
-    if (strlen(destdir) == 0) {
-        return {};
-    }
-
-    auto testmap_path = std::filesystem::path(testmaps_dir) / name;
-    auto map_in_game_path = fs::path(destdir) / name.filename();
-    fs::copy(testmap_path, map_in_game_path, fs::copy_options::overwrite_existing);
-
-    std::string map_string = map_in_game_path.generic_string();
-
-    const char *command_line[] = {R"(C:\Users\Eric\Documents\q2tools-220\x64\Debug\4bsp.exe)",
-        map_string.c_str(),
-        NULL};
-
-    struct subprocess_s subprocess;
-    int result = subprocess_create(command_line, 0, &subprocess);
-    if (0 != result) {
-        throw std::runtime_error("error launching process");
-    }
-
-    // let the process write
-    FILE* p_stdout = subprocess_stdout(&subprocess);
-    char buf[32];
-    void *res;
-    do {
-        res = fgets(buf, 32, p_stdout);
-    } while (res != nullptr);
-
-    int retcode;
-    if (0 != subprocess_join(&subprocess, &retcode)) {
-        throw std::runtime_error("error joining");
-    }
-
-    // re-open the .bsp and return it
-    fs::path bsp_path = map_in_game_path;
-    bsp_path.replace_extension("bsp");
-
-    bspdata_t bspdata;
-    LoadBSPFile(bsp_path, &bspdata);
-
-    bspdata.version->game->init_filesystem(bsp_path, qbsp_options);
-
-    ConvertBSPFormat(&bspdata, &bspver_generic);
-
-    // write to .json for inspection
-    serialize_bsp(bspdata, std::get<mbsp_t>(bspdata.bsp), fs::path(bsp_path).replace_extension(".bsp.json"));
-
-    std::optional<prtfile_t> prtfile;
-    if (const auto prtpath = fs::path(bsp_path).replace_extension(".prt"); fs::exists(prtpath)) {
-        prtfile = {LoadPrtFile(prtpath, bspdata.loadversion)};
-    }
-
-    return std::make_tuple(std::move(std::get<mbsp_t>(bspdata.bsp)),
-        std::move(bspdata.bspx.entries),
-        std::move(prtfile));
-}
-
-std::tuple<mbsp_t, bspxentries_t, std::optional<prtfile_t>> LoadTestmapRefQ1(const std::filesystem::path &name)
-{
-    auto testmap_path = std::filesystem::path(testmaps_dir) / name;
-    std::string testmap_path_string = testmap_path.generic_string();
-
-    const char *command_line[] = {R"(C:\Users\Eric\Downloads\ericw-tools-v0.18.1-win64\bin\qbsp.exe)",
-        testmap_path_string.c_str(),
-        NULL};
-
-    struct subprocess_s subprocess;
-    int result = subprocess_create(command_line, 0, &subprocess);
-    if (0 != result) {
-        throw std::runtime_error("error launching process");
-    }
-
-    // let the process write
-    FILE* p_stdout = subprocess_stdout(&subprocess);
-    char buf[32];
-    void *res;
-    do {
-        res = fgets(buf, 32, p_stdout);
-    } while (res != nullptr);
-
-    int retcode;
-    if (0 != subprocess_join(&subprocess, &retcode)) {
-        throw std::runtime_error("error joining");
-    }
-
-    // re-open the .bsp and return it
-    fs::path bsp_path = testmap_path;
-    bsp_path.replace_extension("bsp");
-
-    bspdata_t bspdata;
-    LoadBSPFile(bsp_path, &bspdata);
-
-    bspdata.version->game->init_filesystem(bsp_path, qbsp_options);
-
-    ConvertBSPFormat(&bspdata, &bspver_generic);
-
-    // write to .json for inspection
-    serialize_bsp(bspdata, std::get<mbsp_t>(bspdata.bsp), fs::path(bsp_path).replace_extension(".bsp.json"));
-
-    std::optional<prtfile_t> prtfile;
-    if (const auto prtpath = fs::path(bsp_path).replace_extension(".prt"); fs::exists(prtpath)) {
-        prtfile = {LoadPrtFile(prtpath, bspdata.loadversion)};
-    }
-
-    return std::make_tuple(std::move(std::get<mbsp_t>(bspdata.bsp)),
-        std::move(bspdata.bspx.entries),
-        std::move(prtfile));
-}
-#endif
-
 std::tuple<mbsp_t, bspxentries_t, std::optional<prtfile_t>> LoadTestmap(const std::filesystem::path &name, std::vector<std::string> extra_args)
 {
     auto map_path = std::filesystem::path(testmaps_dir) / name;
@@ -225,6 +110,7 @@ std::tuple<mbsp_t, bspxentries_t, std::optional<prtfile_t>> LoadTestmap(const st
         auto dest = fs::path(destdir) / name.filename();
         dest.replace_extension(".bsp");
         fs::copy(qbsp_options.bsp_path, dest, fs::copy_options::overwrite_existing);
+        logging::print("copied from {} to {}\n", qbsp_options.bsp_path, dest);
     }
 
     // re-open the .bsp and return it
@@ -1106,27 +992,36 @@ TEST_CASE("brush_clipping_order" * doctest::test_suite("testmaps_q1"))
  */
 TEST_CASE("origin" * doctest::test_suite("testmaps_q1"))
 {
-    const auto [bsp, bspx, prt] = LoadTestmapQ1("qbsp_origin.map");
+    const std::vector<std::string> maps{
+        "qbsp_origin.map",
+        "qbsp_hiprotate.map" // same, but uses info_rotate instead of an origin brush
+    };
 
-    REQUIRE(prt.has_value());
+    for (const auto& map : maps) {
+        SUBCASE(map.c_str()) {
+            const auto [bsp, bspx, prt] = LoadTestmapQ1(map);
 
-    // 0 = world, 1 = rotate_object
-    REQUIRE(2 == bsp.dmodels.size());
+            REQUIRE(prt.has_value());
 
-    // check that the origin brush didn't clip away any solid faces, or generate faces
-    REQUIRE(6 == bsp.dmodels[1].numfaces);
+            // 0 = world, 1 = rotate_object
+            REQUIRE(2 == bsp.dmodels.size());
 
-    // FIXME: should the origin brush update the dmodel's origin too?
-    REQUIRE(qvec3f(0, 0, 0) == bsp.dmodels[1].origin);
+            // check that the origin brush didn't clip away any solid faces, or generate faces
+            REQUIRE(6 == bsp.dmodels[1].numfaces);
 
-    // check that the origin brush updated the entity lump
-    parser_t parser(bsp.dentdata, { "qbsp_origin.bsp" });
-    auto ents = EntData_Parse(parser);
-    auto it = std::find_if(ents.begin(), ents.end(), 
-        [](const entdict_t &dict) -> bool { return dict.get("classname") == "rotate_object"; });
+            // FIXME: should the origin brush update the dmodel's origin too?
+            REQUIRE(qvec3f(0, 0, 0) == bsp.dmodels[1].origin);
 
-    REQUIRE(it != ents.end());
-    CHECK(it->get("origin") == "216 -216 340");
+            // check that the origin brush updated the entity lump
+            parser_t parser(bsp.dentdata, {"qbsp_origin.bsp"});
+            auto ents = EntData_Parse(parser);
+            auto it = std::find_if(ents.begin(), ents.end(),
+                [](const entdict_t &dict) -> bool { return dict.get("classname") == "rotate_object"; });
+
+            REQUIRE(it != ents.end());
+            CHECK(it->get("origin") == "216 -216 340");
+        }
+    }
 }
 
 TEST_CASE("simple" * doctest::test_suite("testmaps_q1"))

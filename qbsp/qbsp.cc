@@ -1404,6 +1404,10 @@ static void LoadTextureData()
                 } else {
                     logging::print("WARNING: unable to find texture {}\n", map.miptex[i].name);
                 }
+
+                //#GUDRON
+                miptex.width = 0;
+                miptex.height = 0;
             } else {
                 miptex.width = tex->meta.width;
                 miptex.height = tex->meta.height;
@@ -1421,9 +1425,9 @@ static void LoadTextureData()
         miptex.data.resize(sizeof(dmiptex_t));
 
         dmiptex_t header{};
-        if (miptex.name.size() >= 16) {
+        if (miptex.name.size() >= MAX_TEXTURE_NAME_LEN) {
             logging::print("WARNING: texture {} name too long for Quake miptex\n", miptex.name);
-            std::copy_n(miptex.name.begin(), 15, header.name.begin());
+            std::copy_n(miptex.name.begin(), MAX_TEXTURE_NAME_LEN - 1, header.name.begin());
         } else {
             std::copy(miptex.name.begin(), miptex.name.end(), header.name.begin());
         }

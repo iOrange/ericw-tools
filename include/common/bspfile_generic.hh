@@ -82,9 +82,10 @@ struct mvis_t
 // structured data from BSP. this is the header of the miptex used
 // in Quake-like formats.
 constexpr size_t MIPLEVELS = 4;
+constexpr size_t MAX_TEXTURE_NAME_LEN = 64; //#GUDRON
 struct dmiptex_t
 {
-    std::array<char, 16> name;
+    std::array<char, MAX_TEXTURE_NAME_LEN> name;
     uint32_t width, height;
     std::array<int32_t, MIPLEVELS> offsets; /* four mip maps stored */
 

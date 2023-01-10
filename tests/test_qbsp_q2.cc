@@ -2,8 +2,6 @@
 #include <common/bsputils.hh>
 #include <common/qvec.hh>
 
-#include <nanobench.h>
-
 #include <cstring>
 #include <set>
 #include <stdexcept>
@@ -544,6 +542,20 @@ TEST_CASE("q2_mirrorinside" * doctest::test_suite("testmaps_q2"))
     const auto [bsp, bspx, prt] = LoadTestmapQ2("qbsp_q2_mirrorinside.map");
 
     {
+        INFO("window is not two sided by default");
+        const qvec3d window_pos{192, 96, 156};
+        CHECK_VECTORS_UNOREDERED_EQUAL(TexNames(bsp, BSP_FindFacesAtPoint(&bsp, &bsp.dmodels[0], window_pos)),
+            std::vector<std::string>({"e2u2/wndow1_1"}));
+    }
+
+    {
+        INFO("aux is not two sided by default");
+        const qvec3d aux_pos{32, 96, 156};
+        CHECK_VECTORS_UNOREDERED_EQUAL(TexNames(bsp, BSP_FindFacesAtPoint(&bsp, &bsp.dmodels[0], aux_pos)),
+            std::vector<std::string>({"e1u1/brwater"}));
+    }
+
+    {
         INFO("mist is two sided by default");
         const qvec3d mist_pos{32, -28, 156};
         CHECK_VECTORS_UNOREDERED_EQUAL(TexNames(bsp, BSP_FindFacesAtPoint(&bsp, &bsp.dmodels[0], mist_pos)),
@@ -599,4 +611,21 @@ TEST_CASE("q2_missing_faces" * doctest::test_suite("testmaps_q2") * doctest::may
     CHECK(BSP_FindFaceAtPoint(&bsp, &bsp.dmodels[0], point_on_missing_face));
     CHECK(BSP_FindFaceAtPoint(&bsp, &bsp.dmodels[0], point_on_missing_face2));
     CHECK(BSP_FindFaceAtPoint(&bsp, &bsp.dmodels[0], point_on_present_face));
+}
+
+TEST_CASE("q2_ladder" * doctest::test_suite("testmaps_q2"))
+{
+    const auto [bsp, bspx, prt] = LoadTestmapQ2("q2_ladder.map");
+
+    const qvec3d point_in_ladder {-8, 184, 24};
+
+    CheckFilled(bsp);
+
+    auto *leaf = BSP_FindLeafAtPoint(&bsp, &bsp.dmodels[0], point_in_ladder);
+
+    // the brush lacked a visible contents, so it became solid. solid leafs wipe out any other content bits
+    CHECK(leaf->contents == (Q2_CONTENTS_SOLID));
+
+    CHECK(1 == Leaf_Brushes(&bsp, leaf).size());
+    CHECK((Q2_CONTENTS_SOLID | Q2_CONTENTS_LADDER | Q2_CONTENTS_DETAIL) == Leaf_Brushes(&bsp, leaf).at(0)->contents);
 }

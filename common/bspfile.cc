@@ -1089,7 +1089,7 @@ struct gamedef_q2_t : public gamedef_t
             return contents.mirror_inside.value();
 
         // Q2 is a bit different here. in vanilla tools,
-        // every content except SOLID is implicitly mirrorinside.
+        // every content except SOLID and WINDOW is implicitly mirrorinside.
         // the only exception is that 4bsp has the unused AUX
         // contents to default to not mirroring the insides.
         return !(contents.native & (Q2_CONTENTS_SOLID | Q2_CONTENTS_AUX));
@@ -1258,8 +1258,8 @@ struct gamedef_q2_t : public gamedef_t
             if (brushcontents.mirror_inside) {
                 return *brushcontents.mirror_inside;
             }
-            if (portal_visible_contents.native & Q2_CONTENTS_WINDOW) {
-                // windows don't generate inside faces
+            if (portal_visible_contents.native & (Q2_CONTENTS_WINDOW | Q2_CONTENTS_AUX)) {
+                // windows or aux don't generate inside faces
                 return false;
             }
             // other types get mirrored by default
